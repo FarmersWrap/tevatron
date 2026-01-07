@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import pickle
@@ -114,6 +115,13 @@ def main():
     model = model.to(training_args.device)
     model.eval()
 
+    # Track EOS statistics
+    eos_stats = {
+        'per_passage': [],  # List of (doc_id, num_eos) tuples
+        'total_eos': 0,
+        'total_passages': 0,
+    }
+
     for batch in tqdm(encode_loader):
         with torch.amp.autocast('cuda') if training_args.fp16 or training_args.bf16 else nullcontext():
             with torch.no_grad():
@@ -122,7 +130,14 @@ def main():
                     # batch_inputs: input_ids, attention_mask
                     for k, v in batch_inputs.items():
                         batch_inputs[k] = v.to(training_args.device)
-                    print(f"eos_positions: {eos_positions}")
+                    
+                    # Count EOS tokens per passage
+                    for i, doc_id in enumerate(doc_ids):
+                        num_eos = len(eos_positions[i]) if i < len(eos_positions) else 0
+                        eos_stats['per_passage'].append((doc_id, num_eos))
+                        eos_stats['total_eos'] += num_eos
+                        eos_stats['total_passages'] += 1
+                    
                     chunk_embs, chunk_mask = model.encode_passage(batch_inputs, eos_positions)
                     # chunk_embs: [batch_size, max_chunks, hidden_size]
                     # chunk_mask: [batch_size, max_chunks]
@@ -146,17 +161,42 @@ def main():
                         model_output: EncoderOutput = model(passage=batch_inputs)
                         encoded.append(model_output.p_reps.cpu().detach().numpy())
     if use_pre_chunked or use_chunked:
-        print("use_chunked: ", use_chunked)
-        print(f"encoded: {encoded}")
-        print(f"lookup_indices: {lookup_indices}")
-        print(f"length of encoded: {len(encoded)}")
-        print(f"length of lookup_indices: {len(lookup_indices)}")
-    # Combine encoded embeddings
+        # Combine encoded embeddings
         encoded = np.stack(encoded)
         logger.info(f"Encoded {len(set(d for d, c in lookup_indices))} docs into {len(lookup_indices)} chunks")
-        print(f"encoded.shape: {encoded.shape}")
-        print(f"length of encoded: {len(encoded)}")
-        # input("Press Enter to continue...")
+        
+        # Log EOS statistics
+        if eos_stats['total_passages'] > 0:
+            eos_counts = [num_eos for _, num_eos in eos_stats['per_passage']]
+            avg_eos = eos_stats['total_eos'] / eos_stats['total_passages']
+            min_eos = min(eos_counts) if eos_counts else 0
+            max_eos = max(eos_counts) if eos_counts else 0
+            
+            logger.info("=" * 80)
+            logger.info("EOS Token Statistics:")
+            logger.info(f"  Total passages processed: {eos_stats['total_passages']}")
+            logger.info(f"  Total EOS tokens added: {eos_stats['total_eos']}")
+            logger.info(f"  Average EOS per passage: {avg_eos:.2f}")
+            logger.info(f"  Min EOS per passage: {min_eos}")
+            logger.info(f"  Max EOS per passage: {max_eos}")
+            logger.info(f"  Total chunks created: {len(lookup_indices)}")
+            logger.info("=" * 80)
+            
+            # Save detailed EOS stats to file
+            eos_stats_file = data_args.encode_output_path.replace('.pkl', '_eos_stats.json')
+            eos_stats_dict = {
+                'total_passages': eos_stats['total_passages'],
+                'total_eos': eos_stats['total_eos'],
+                'total_chunks': len(lookup_indices),
+                'average_eos_per_passage': avg_eos,
+                'min_eos': min_eos,
+                'max_eos': max_eos,
+                'per_passage': [{'doc_id': doc_id, 'num_eos': num_eos} 
+                               for doc_id, num_eos in eos_stats['per_passage']]
+            }
+            with open(eos_stats_file, 'w') as f:
+                json.dump(eos_stats_dict, f, indent=2)
+            logger.info(f"Detailed EOS statistics saved to: {eos_stats_file}")
     else:
         encoded = np.concatenate(encoded)
 
