@@ -271,6 +271,131 @@ class TrainCollator:
 
 
 @dataclass
+class PreChunkedTrainCollator:
+    """
+    Collator for training with pre-chunked passages.
+    Expects passages as lists of pre-chunked strings and adds EOS tokens between chunks.
+    Similar to PreChunkedEncodeCollator but for training.
+    """
+    data_args: DataArguments
+    tokenizer: PreTrainedTokenizer
+
+    def __call__(self, features: List[Tuple[str, List[List[str]]]]):
+        """
+        Collate function for training with pre-chunked passages.
+        :param features: list of (query, chunks_lists) tuples
+                        where chunks_lists is a list of pre-chunked passage chunks (each passage is a list of chunk strings)
+                        Example: [("query1", [["chunk1", "chunk2"], ["chunk3"]]), ...]
+        :return: (q_collated, d_collated, eos_positions) - tokenized queries, passages with EOS, and EOS positions
+        """
+        all_queries = [f[0] for f in features]
+        all_chunks_lists = []
+        for f in features:
+            all_chunks_lists.extend(f[1])  # f[1] is List[List[str]], extend flattens one level
+        
+        # Extract query strings (queries are tuples where first element is the string)
+        all_queries = [q[0] if isinstance(q, tuple) else q for q in all_queries]
+        
+        # Tokenize queries
+        q_collated = self.tokenizer(
+            all_queries,
+            padding=False, 
+            truncation=True,
+            max_length=self.data_args.query_max_len-1 if self.data_args.append_eos_token else self.data_args.query_max_len,
+            return_attention_mask=False,
+            return_token_type_ids=False,
+            add_special_tokens=True,
+        )
+        if self.data_args.append_eos_token:
+            q_collated['input_ids'] = [q + [self.tokenizer.eos_token_id] for q in q_collated['input_ids']]
+        q_collated = self.tokenizer.pad(
+            q_collated,
+            padding=True, 
+            pad_to_multiple_of=self.data_args.pad_to_multiple_of,
+            return_attention_mask=True,
+            return_tensors='pt',
+        )
+        
+        # Process pre-chunked passages: tokenize each chunk and add EOS between them
+        d_collated, all_eos_positions = self._tokenize_and_pad_pre_chunked_passages(all_chunks_lists)
+        
+        return q_collated, d_collated, all_eos_positions
+
+    def _tokenize_and_pad_pre_chunked_passages(self, chunks_lists: List[List[str]]):
+        """
+        Tokenize pre-chunked passages and add EOS tokens between chunks.
+        
+        This is used when you have pre-chunked passages (e.g., from ChatGPT or manual chunking).
+        Each chunk is tokenized separately, and EOS tokens are inserted between chunks.
+        
+        :param chunks_lists: List of lists, where each inner list contains pre-chunked passage strings
+                            Example: [["chunk1", "chunk2"], ["chunk3"]] for 2 passages
+        :return: (collated_dict, eos_positions) - padded tensors and EOS positions per passage
+        """
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is None:
+            raise ValueError("tokenizer.eos_token_id is None; cannot add EOS tokens between chunks.")
+        
+        max_length = self.data_args.passage_max_len
+        all_input_ids = []
+        all_eos_positions = []
+        
+        for chunks in chunks_lists:
+            if chunks is None:
+                chunks = []
+            if not isinstance(chunks, list):
+                raise ValueError(f"Expected list of chunks, got {type(chunks)}")
+            if len(chunks) == 0:
+                # Empty chunks list - create empty passage with no EOS positions
+                all_input_ids.append([])
+                all_eos_positions.append([])
+                continue
+            
+            # Tokenize each chunk and concatenate with EOS between them
+            ids = []
+            eos_pos = []
+            total_length = 0
+            
+            for chunk_idx, chunk in enumerate(chunks):
+                if chunk is None:
+                    chunk = ""
+                # Tokenize this chunk (without special tokens, we'll add EOS manually)
+                chunk_tokens = self.tokenizer.encode(chunk, add_special_tokens=False)
+                
+                # Check if adding this chunk + EOS would exceed max_length
+                chunk_size = len(chunk_tokens)
+                if max_length and total_length + chunk_size + 1 > max_length:
+                    # Use remaining space (leave 1 for EOS if possible)
+                    remaining = max_length - total_length - 1
+                    if remaining > 0:
+                        chunk_tokens = chunk_tokens[:remaining]
+                        ids.extend(chunk_tokens)
+                        ids.append(eos_id)
+                        eos_pos.append(len(ids) - 1)
+                    break
+                
+                # Add chunk tokens
+                ids.extend(chunk_tokens)
+                # Add EOS after each chunk
+                ids.append(eos_id)
+                eos_pos.append(len(ids) - 1)
+                total_length += chunk_size + 1
+            
+            all_input_ids.append(ids)
+            all_eos_positions.append(eos_pos)
+        
+        d_collated, adjusted_eos_positions = _pad_and_adjust_eos_positions(
+            all_input_ids=all_input_ids,
+            all_eos_positions=all_eos_positions,
+            tokenizer=self.tokenizer,
+            padding_side=self.data_args.padding_side,
+            pad_to_multiple_of=self.data_args.pad_to_multiple_of,
+        )
+        
+        return d_collated, adjusted_eos_positions
+
+
+@dataclass
 class MultiModalTrainCollator:
     """
     collator for text-visual data.

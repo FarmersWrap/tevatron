@@ -12,7 +12,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from tevatron.retriever.arguments import ModelArguments, DataArguments, \
     TevatronTrainingArguments as TrainingArguments
 from tevatron.retriever.dataset import TrainDataset
-from tevatron.retriever.collator import TrainCollator
+from tevatron.retriever.collator import TrainCollator, PreChunkedTrainCollator
 from tevatron.retriever.modeling import DenseModel
 from tevatron.retriever.trainer import TevatronTrainer as Trainer
 from tevatron.retriever.gc_trainer import GradCacheTrainer as GCTrainer
@@ -88,19 +88,35 @@ def main():
         torch_dtype=torch_dtype,
         attn_implementation=model_args.attn_implementation,
     )
-    # Set passage_chunk_size: use fixed chunk size if set, otherwise set to 1 if using random chunking
+    train_dataset = TrainDataset(data_args)
+    
+    # Detect if data is pre-chunked (has 'chunks' field in passages)
+    # Check first sample to determine format
+    use_prechunked = False
+    if len(train_dataset) > 0:
+        sample = train_dataset.train_data[0]
+        if 'positive_passages' in sample and sample['positive_passages']:
+            if 'chunks' in sample['positive_passages'][0]:
+                use_prechunked = True
+                logger.info("Detected pre-chunked data format (has 'chunks' field). Using PreChunkedTrainCollator.")
+    
+    # Set passage_chunk_size: use fixed chunk size if set, otherwise set to 1 if using random chunking or pre-chunked
     # (model uses passage_chunk_size > 0 as signal to use chunked encoding)
-    if data_args.passage_chunk_size > 0:
+    if use_prechunked:
+        # For pre-chunked data, enable chunked encoding (size doesn't matter, chunks are already determined)
+        model.passage_chunk_size = 1
+        collator = PreChunkedTrainCollator(data_args, tokenizer)
+    elif data_args.passage_chunk_size > 0:
         model.passage_chunk_size = data_args.passage_chunk_size
+        collator = TrainCollator(data_args, tokenizer)
     elif data_args.passage_chunk_size_range is not None:
         # For random chunking, set to a positive value to enable chunked encoding
         # The actual chunk sizes will be determined per-passage by the collator
         model.passage_chunk_size = 1
+        collator = TrainCollator(data_args, tokenizer)
     else:
         model.passage_chunk_size = 0
-
-    train_dataset = TrainDataset(data_args)
-    collator = TrainCollator(data_args, tokenizer)
+        collator = TrainCollator(data_args, tokenizer)
 
     trainer_cls = GCTrainer if training_args.grad_cache else Trainer
     trainer = trainer_cls(

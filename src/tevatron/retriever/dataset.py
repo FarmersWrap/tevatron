@@ -120,33 +120,71 @@ class TrainDataset(Dataset):
             formatted_query = (self.data_args.query_prefix + query_text,
                                query_image, query_video, query_audio)
 
-            formatted_documents = []
-            # Select positive document
-            selected_positive = group['positive_passages'][(_hashed_seed + epoch) % len(group['positive_passages'])]
-            positive_text = (selected_positive['title'] + ' ' + selected_positive['text']
-                             if 'title' in selected_positive else selected_positive['text'])
-            formatted_documents.append((self.data_args.passage_prefix + positive_text, None, None, None))
+            # Check if passages use chunks (pre-chunked format)
+            use_chunks = 'chunks' in group['positive_passages'][0] if group['positive_passages'] else False
+            
+            if use_chunks:
+                # Pre-chunked format: return List[List[str]] for PreChunkedTrainCollator
+                formatted_documents = []
+                # Select positive document
+                selected_positive = group['positive_passages'][(_hashed_seed + epoch) % len(group['positive_passages'])]
+                positive_chunks = selected_positive.get('chunks', [])
+                # Apply prefix to each chunk if needed
+                if self.data_args.passage_prefix:
+                    positive_chunks = [self.data_args.passage_prefix + chunk if chunk else chunk for chunk in positive_chunks]
+                formatted_documents.append(positive_chunks)
 
-            # Select negative documents
-            negative_size = self.data_args.train_group_size - 1
-            if len(group['negative_passages']) < negative_size:
-                print(f"selected_negatives: Randomly selected!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                selected_negatives = random.choices(group['negative_passages'], k=negative_size)
-            elif self.data_args.train_group_size == 1:
-                selected_negatives = []
+                # Select negative documents
+                negative_size = self.data_args.train_group_size - 1
+                if len(group['negative_passages']) < negative_size:
+                    print(f"selected_negatives: Randomly selected!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                    selected_negatives = random.choices(group['negative_passages'], k=negative_size)
+                elif self.data_args.train_group_size == 1:
+                    selected_negatives = []
+                else:
+                    offset = epoch * negative_size % len(group['negative_passages'])
+                    selected_negatives = list(group['negative_passages'])
+                    random.Random(_hashed_seed).shuffle(selected_negatives)
+                    selected_negatives = selected_negatives * 2
+                    selected_negatives = selected_negatives[offset: offset + negative_size]
+
+                for negative in selected_negatives:
+                    negative_chunks = negative.get('chunks', [])
+                    # Apply prefix to each chunk if needed
+                    if self.data_args.passage_prefix:
+                        negative_chunks = [self.data_args.passage_prefix + chunk if chunk else chunk for chunk in negative_chunks]
+                    formatted_documents.append(negative_chunks)
+
+                return formatted_query, formatted_documents
             else:
-                offset = epoch * negative_size % len(group['negative_passages'])
-                selected_negatives = list(group['negative_passages'])
-                random.Random(_hashed_seed).shuffle(selected_negatives)
-                selected_negatives = selected_negatives * 2
-                selected_negatives = selected_negatives[offset: offset + negative_size]
+                # Regular format: return List[Tuple[str, ...]] for TrainCollator
+                formatted_documents = []
+                # Select positive document
+                selected_positive = group['positive_passages'][(_hashed_seed + epoch) % len(group['positive_passages'])]
+                positive_text = (selected_positive['title'] + ' ' + selected_positive['text']
+                                 if 'title' in selected_positive else selected_positive['text'])
+                formatted_documents.append((self.data_args.passage_prefix + positive_text, None, None, None))
 
-            for negative in selected_negatives:
-                negative_text = (negative['title'] + ' ' + negative['text']
-                                 if 'title' in negative else negative['text'])
-                formatted_documents.append((self.data_args.passage_prefix + negative_text, None, None, None))
+                # Select negative documents
+                negative_size = self.data_args.train_group_size - 1
+                if len(group['negative_passages']) < negative_size:
+                    print(f"selected_negatives: Randomly selected!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                    selected_negatives = random.choices(group['negative_passages'], k=negative_size)
+                elif self.data_args.train_group_size == 1:
+                    selected_negatives = []
+                else:
+                    offset = epoch * negative_size % len(group['negative_passages'])
+                    selected_negatives = list(group['negative_passages'])
+                    random.Random(_hashed_seed).shuffle(selected_negatives)
+                    selected_negatives = selected_negatives * 2
+                    selected_negatives = selected_negatives[offset: offset + negative_size]
 
-            return formatted_query, formatted_documents
+                for negative in selected_negatives:
+                    negative_text = (negative['title'] + ' ' + negative['text']
+                                     if 'title' in negative else negative['text'])
+                    formatted_documents.append((self.data_args.passage_prefix + negative_text, None, None, None))
+
+                return formatted_query, formatted_documents
 
         # Handling the new format
         query_id = group['query_id']
