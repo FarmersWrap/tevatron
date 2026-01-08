@@ -147,9 +147,19 @@ def _tokenize_and_pad_chunked_passages(
         if passage is None:
             passage = ""
         tokens = tokenizer.encode(passage, add_special_tokens=False)
-        # Use per-passage chunk size if provided, otherwise use fixed chunk size
-        # Note: chunk_size is ignored in _chunk_tokens when chunk_size_range is provided
-        chunk_size = chunk_sizes[idx] if chunk_sizes is not None else data_args.passage_chunk_size
+        
+        # Determine chunk size for this passage
+        if chunk_size_range is not None:
+            # Random chunking mode - chunk_size_range takes precedence
+            # chunk_size parameter will be ignored by _chunk_tokens when chunk_size_range is provided
+            chunk_size = data_args.passage_chunk_size if data_args.passage_chunk_size > 0 else chunk_size_range[0]
+        elif chunk_sizes is not None:
+            # Per-passage chunk sizes (passage-level random)
+            chunk_size = chunk_sizes[idx]
+        else:
+            # Fixed chunk size
+            chunk_size = data_args.passage_chunk_size
+        
         ids, eos_pos = _chunk_tokens(
             tokens=tokens,
             chunk_size=chunk_size,
@@ -548,7 +558,7 @@ class EncodeCollator:
 
 @dataclass
 class ChunkedEncodeCollator:
-    """Collator for chunked passage encoding (inference/search). Uses fixed chunk size (passage_chunk_size), not random chunking."""
+    """Collator for chunked passage encoding (inference/search). Supports fixed chunk size, passage-level random, and fully random chunking."""
     data_args: DataArguments
     tokenizer: PreTrainedTokenizer
 
@@ -561,13 +571,34 @@ class ChunkedEncodeCollator:
         doc_ids = [x[0] for x in features]
         texts = [x[1] for x in features]
         
-        # Always use fixed chunking for inference (no random chunk sizes)
-        d_collated, all_eos_positions = self._tokenize_and_pad_chunked_passages(texts)
+        # Check for random chunking modes
+        if self.data_args.passage_chunk_size_range is not None:
+            # Parse range string (e.g., "64, 128" or "64,128")
+            try:
+                parts = [p.strip() for p in self.data_args.passage_chunk_size_range.split(',')]
+                if len(parts) != 2:
+                    raise ValueError(f"passage_chunk_size_range must contain exactly 2 values separated by comma, got: {self.data_args.passage_chunk_size_range}")
+                chunk_size_min = int(parts[0])
+                chunk_size_max = int(parts[1])
+            except ValueError as e:
+                raise ValueError(f"Invalid passage_chunk_size_range format '{self.data_args.passage_chunk_size_range}'. Expected format: 'min,max' (e.g., '64,128')") from e
+            
+            if self.data_args.passage_chunk_size_variable:
+                # Fully random: each chunk within a passage gets a random size
+                chunk_size_range = (chunk_size_min, chunk_size_max)
+                d_collated, all_eos_positions = self._tokenize_and_pad_chunked_passages(texts, chunk_size_range=chunk_size_range)
+            else:
+                # Passage-level random: all chunks in a passage use the same random size
+                chunk_sizes = [random.randint(chunk_size_min, chunk_size_max) for _ in texts]
+                d_collated, all_eos_positions = self._tokenize_and_pad_chunked_passages(texts, chunk_sizes=chunk_sizes)
+        else:
+            # Fixed chunk size
+            d_collated, all_eos_positions = self._tokenize_and_pad_chunked_passages(texts)
         
         return doc_ids, d_collated, all_eos_positions
 
-    def _tokenize_and_pad_chunked_passages(self, passages: List[str]):
-        return _tokenize_and_pad_chunked_passages(passages, self.tokenizer, self.data_args)
+    def _tokenize_and_pad_chunked_passages(self, passages: List[str], chunk_sizes: Optional[List[int]] = None, chunk_size_range: Optional[Tuple[int, int]] = None):
+        return _tokenize_and_pad_chunked_passages(passages, self.tokenizer, self.data_args, chunk_sizes=chunk_sizes, chunk_size_range=chunk_size_range)
 
 
 @dataclass

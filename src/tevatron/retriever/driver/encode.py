@@ -83,7 +83,8 @@ def main():
         data_args=data_args,
     )
 
-    use_chunked = not data_args.encode_is_query and data_args.passage_chunk_size > 0
+    # Enable chunked mode if passage_chunk_size > 0 OR passage_chunk_size_range is set
+    use_chunked = not data_args.encode_is_query and (data_args.passage_chunk_size > 0 or data_args.passage_chunk_size_range is not None)
     use_pre_chunked = not data_args.encode_is_query and data_args.encode_use_pre_chunked
     print("data_args.encode_is_query: ", data_args.encode_is_query)
     print("data_args.passage_chunk_size: ", data_args.passage_chunk_size)
@@ -91,16 +92,30 @@ def main():
     print("use_chunked: ", use_chunked)
     print("use_pre_chunked: ", use_pre_chunked)
     
+    # Determine chunking mode for stats tracking
+    chunking_mode = "none"
     if use_pre_chunked:
         logger.info("Using pre-chunked passage encoding (custom EOS positions from pre-chunked data)")
         model.passage_chunk_size = 1  # Signal to use chunked encoding
         encode_collator = PreChunkedEncodeCollator(data_args=data_args, tokenizer=tokenizer)
+        chunking_mode = "pre_chunked"
     elif use_chunked:
-        logger.info(f"Using chunked passage encoding with chunk_size={data_args.passage_chunk_size}")
-        model.passage_chunk_size = data_args.passage_chunk_size
+        # Check for random chunking modes
+        if data_args.passage_chunk_size_range is not None:
+            if data_args.passage_chunk_size_variable:
+                logger.info(f"Using fully random chunked encoding with range={data_args.passage_chunk_size_range}")
+                chunking_mode = f"fully_random_{data_args.passage_chunk_size_range}"
+            else:
+                logger.info(f"Using passage-level random chunked encoding with range={data_args.passage_chunk_size_range}")
+                chunking_mode = f"passage_random_{data_args.passage_chunk_size_range}"
+        else:
+            logger.info(f"Using fixed chunked passage encoding with chunk_size={data_args.passage_chunk_size}")
+            chunking_mode = f"fixed_chunk_size_{data_args.passage_chunk_size}"
+        model.passage_chunk_size = data_args.passage_chunk_size if data_args.passage_chunk_size > 0 else 1
         encode_collator = ChunkedEncodeCollator(data_args=data_args, tokenizer=tokenizer)
     else:
         encode_collator = EncodeCollator(data_args=data_args, tokenizer=tokenizer)
+        chunking_mode = "no_chunking"
 
     encode_loader = DataLoader(
         encode_dataset,
@@ -117,9 +132,15 @@ def main():
 
     # Track EOS statistics
     eos_stats = {
+        'chunking_mode': chunking_mode,
         'per_passage': [],  # List of (doc_id, num_eos) tuples
         'total_eos': 0,
         'total_passages': 0,
+        'config': {
+            'passage_chunk_size': data_args.passage_chunk_size if hasattr(data_args, 'passage_chunk_size') else None,
+            'passage_max_len': data_args.passage_max_len if hasattr(data_args, 'passage_max_len') else None,
+            'encode_use_pre_chunked': data_args.encode_use_pre_chunked if hasattr(data_args, 'encode_use_pre_chunked') else False,
+        }
     }
 
     for batch in tqdm(encode_loader):
@@ -174,6 +195,7 @@ def main():
             
             logger.info("=" * 80)
             logger.info("EOS Token Statistics:")
+            logger.info(f"  Chunking Mode: {eos_stats['chunking_mode']}")
             logger.info(f"  Total passages processed: {eos_stats['total_passages']}")
             logger.info(f"  Total EOS tokens added: {eos_stats['total_eos']}")
             logger.info(f"  Average EOS per passage: {avg_eos:.2f}")
@@ -185,12 +207,14 @@ def main():
             # Save detailed EOS stats to file
             eos_stats_file = data_args.encode_output_path.replace('.pkl', '_eos_stats.json')
             eos_stats_dict = {
+                'chunking_mode': eos_stats['chunking_mode'],
                 'total_passages': eos_stats['total_passages'],
                 'total_eos': eos_stats['total_eos'],
                 'total_chunks': len(lookup_indices),
                 'average_eos_per_passage': avg_eos,
                 'min_eos': min_eos,
                 'max_eos': max_eos,
+                'config': eos_stats['config'],
                 'per_passage': [{'doc_id': doc_id, 'num_eos': num_eos} 
                                for doc_id, num_eos in eos_stats['per_passage']]
             }
