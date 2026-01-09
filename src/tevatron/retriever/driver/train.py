@@ -98,6 +98,10 @@ def main():
         model.passage_chunk_size = 1
     else:
         model.passage_chunk_size = 0
+    
+    # Set chunk similarity mode (maxsim, avgsim, or both for comparison)
+    model.chunk_similarity_mode = data_args.chunk_similarity_mode
+    logger.info(f"Using chunk similarity mode: {model.chunk_similarity_mode}")
 
     train_dataset = TrainDataset(data_args)
     collator = TrainCollator(data_args, tokenizer)

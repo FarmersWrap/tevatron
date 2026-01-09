@@ -40,6 +40,7 @@ class EncoderModel(nn.Module):
         self.normalize = normalize
         self.temperature = temperature
         self.passage_chunk_size = 0
+        self.chunk_similarity_mode = 'max'  # 'max', 'avg', or 'both'
         self.cross_entropy = nn.CrossEntropyLoss(reduction='mean')
         self.is_ddp = dist.is_initialized()
         if self.is_ddp:
@@ -83,9 +84,25 @@ class EncoderModel(nn.Module):
             # print(f"passage_chunk_size: {self.passage_chunk_size}")
             # print(f"chunk_mask: {chunk_mask}")
             if self.passage_chunk_size > 0 and chunk_mask is not None:
-                # print(f"start compute maxsim similarity==========================")
-                scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
-                # print(f"end compute maxsim similarity==========================")
+                if self.chunk_similarity_mode == 'both':
+                    # Compute both maxsim and avgsim for comparison
+                    maxsim_scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
+                    avgsim_scores = self.compute_avgsim_similarity(q_reps, p_reps, chunk_mask)
+                    # Log comparison
+                    if (not getattr(self, "is_ddp", False)) or getattr(self, "process_rank", 0) == 0:
+                        logger.info(f"[similarity_comparison] maxsim_scores.shape={maxsim_scores.shape}, avgsim_scores.shape={avgsim_scores.shape}")
+                        logger.info(f"[similarity_comparison] maxsim_mean={maxsim_scores.mean().item():.6f}, avgsim_mean={avgsim_scores.mean().item():.6f}")
+                        logger.info(f"[similarity_comparison] maxsim_std={maxsim_scores.std().item():.6f}, avgsim_std={avgsim_scores.std().item():.6f}")
+                        # Log difference for first query-passage pair
+                        if maxsim_scores.size(0) > 0 and maxsim_scores.size(1) > 0:
+                            diff = maxsim_scores[0, 0].item() - avgsim_scores[0, 0].item()
+                            logger.info(f"[similarity_comparison] first_pair_diff (maxsim-avgsim)={diff:.6f}")
+                    # Use maxsim for loss computation (you can change this to avgsim if needed)
+                    scores = maxsim_scores
+                elif self.chunk_similarity_mode == 'avg':
+                    scores = self.compute_avgsim_similarity(q_reps, p_reps, chunk_mask)
+                else:  # default to 'max'
+                    scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
             else:
                 # print(f"start compute similarity==========================")
                 scores = self.compute_similarity(q_reps, p_reps)
@@ -105,7 +122,20 @@ class EncoderModel(nn.Module):
         # for eval
         else:
             if self.passage_chunk_size > 0 and chunk_mask is not None:
-                scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
+                if self.chunk_similarity_mode == 'both':
+                    # Compute both for comparison during eval
+                    maxsim_scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
+                    avgsim_scores = self.compute_avgsim_similarity(q_reps, p_reps, chunk_mask)
+                    # Log comparison
+                    if (not getattr(self, "is_ddp", False)) or getattr(self, "process_rank", 0) == 0:
+                        logger.info(f"[eval_similarity_comparison] maxsim_scores.shape={maxsim_scores.shape}, avgsim_scores.shape={avgsim_scores.shape}")
+                        logger.info(f"[eval_similarity_comparison] maxsim_mean={maxsim_scores.mean().item():.6f}, avgsim_mean={avgsim_scores.mean().item():.6f}")
+                    # Return maxsim as primary scores (can be modified if needed)
+                    scores = maxsim_scores
+                elif self.chunk_similarity_mode == 'avg':
+                    scores = self.compute_avgsim_similarity(q_reps, p_reps, chunk_mask)
+                else:  # default to 'max'
+                    scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
             else:
                 scores = self.compute_similarity(q_reps, p_reps)
             loss = None
@@ -178,6 +208,70 @@ class EncoderModel(nn.Module):
                             )
 
         return max_vals
+
+    def compute_avgsim_similarity(self, q_reps, p_reps, chunk_mask):
+        """
+        AvgSim: average similarity between query and passage chunks.
+        q_reps: [Q, H], p_reps: [P, C, H], chunk_mask: [P, C]
+        Q: number of queries
+        P: number of passages
+        C: number of chunks per passage
+        H: dimension of the embeddings
+        Returns: [Q, P]
+        """
+        chunk_scores = torch.einsum('qh,pch->qpc', q_reps, p_reps)  # [Q, P, C]
+        if chunk_mask is not None:
+            # Mask out invalid chunks
+            padding_mask = ~chunk_mask.unsqueeze(0).bool()  # [1, P, C]
+            chunk_scores = chunk_scores.masked_fill(padding_mask, 0.0)
+            # Compute average over valid chunks (sum of valid chunks / count of valid chunks)
+            # valid_chunk_counts: [1, P, 1] -> squeeze to [P] for broadcasting
+            valid_chunk_counts = chunk_mask.unsqueeze(0).sum(dim=-1, keepdim=False).float()  # [1, P]
+            valid_chunk_counts = valid_chunk_counts.clamp(min=1.0)  # Avoid division by zero
+            # chunk_scores.sum(dim=-1): [Q, P], valid_chunk_counts: [1, P] -> broadcasts correctly
+            avg_scores = chunk_scores.sum(dim=-1) / valid_chunk_counts  # [Q, P]
+        else:
+            # No mask, just average over all chunks
+            avg_scores = chunk_scores.mean(dim=-1)  # [Q, P]
+
+        # Log avgsim info
+        if True:
+            # only log from rank-0 if DDP
+            if (not getattr(self, "is_ddp", False)) or getattr(self, "process_rank", 0) == 0:
+                eos_positions = getattr(self, "eos_positions", None)
+                eos_ok = (
+                    isinstance(eos_positions, (list, tuple))
+                    and len(eos_positions) == p_reps.size(0)
+                )
+                
+                # Compute last valid chunk indices for all passages
+                if chunk_mask is not None:
+                    last_ci_per_passage = (chunk_mask.sum(dim=1) - 1).clamp(min=0)  # [P]
+                    valid_chunk_counts = chunk_mask.sum(dim=1)  # [P]
+                else:
+                    last_ci_per_passage = torch.full((p_reps.size(0),), p_reps.size(1) - 1, dtype=torch.long)
+                    valid_chunk_counts = torch.full((p_reps.size(0),), p_reps.size(1), dtype=torch.long)
+                
+                # Log for each query-passage pair
+                for qi in range(avg_scores.size(0)):
+                    for pi in range(avg_scores.size(1)):
+                        last_ci = int(last_ci_per_passage[pi].item())
+                        valid_count = int(valid_chunk_counts[pi].item())
+                        score = float(avg_scores[qi, pi].item())
+                        
+                        if eos_ok and eos_positions[pi] and len(eos_positions[pi]) > 0:
+                            last_pos = eos_positions[pi][-1]
+                            logger.info(
+                                f"[avgsim] q={qi} p={pi} last_chunk={last_ci} last_pos={last_pos} "
+                                f"valid_chunks={valid_count} avg_score={score:.6f}"
+                            )
+                        else:
+                            logger.info(
+                                f"[avgsim] q={qi} p={pi} last_chunk={last_ci} "
+                                f"valid_chunks={valid_count} avg_score={score:.6f}"
+                            )
+
+        return avg_scores
 
     def compute_loss(self, scores, target):
         return self.cross_entropy(scores, target)

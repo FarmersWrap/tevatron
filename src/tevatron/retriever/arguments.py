@@ -218,6 +218,11 @@ class DataArguments:
         metadata={"help": "If True and passage_chunk_size_range is set, each chunk within a passage gets a random size from the range. If False, all chunks in a passage use the same random size. Only for training."}
     )
 
+    chunk_similarity_mode: str = field(
+        default='max',
+        metadata={"help": "Similarity mode for chunked passages: 'max' for MaxSim (max similarity across chunks), 'avg' for AvgSim (average similarity across chunks), 'both' to compute both for comparison."}
+    )
+
 
 @dataclass
 class TevatronTrainingArguments(TrainingArguments):

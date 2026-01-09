@@ -89,6 +89,7 @@ def main():
     if use_chunked:
         logger.info(f"Using chunked passage encoding with chunk_size={data_args.passage_chunk_size}")
         model.passage_chunk_size = data_args.passage_chunk_size
+        model.chunk_similarity_mode = data_args.chunk_similarity_mode
         encode_collator = ChunkedEncodeCollator(data_args=data_args, tokenizer=tokenizer)
     else:
         encode_collator = EncodeCollator(data_args=data_args, tokenizer=tokenizer)
