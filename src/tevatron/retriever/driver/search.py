@@ -32,10 +32,11 @@ def search_queries(retriever, q_reps, p_lookup, args):
 
 def search_queries_chunked(retriever, q_reps, p_lookup, args):
     """
-    Search with chunked passages and aggregate by document using MaxSim.
+    Search with chunked passages and aggregate by document using MaxSim or AvgSim.
     """
     # Search more chunks to ensure good recall after aggregation
     chunk_multiplier = getattr(args, 'chunk_multiplier', 10)
+    aggregation_mode = getattr(args, 'chunk_aggregation_mode', 'max')  # 'max' or 'avg'
     search_depth = args.depth * chunk_multiplier
     
     if args.batch_size > 0:
@@ -44,29 +45,59 @@ def search_queries_chunked(retriever, q_reps, p_lookup, args):
     else:
         # all_scores.shape = [search_depth]
         all_scores, all_indices = retriever.search(q_reps, search_depth)
-    # Aggregate by document ID using MaxSim
+    
+    # Aggregate by document ID using MaxSim or AvgSim
     aggregated_results = []
     for q_idx in range(len(q_reps)):
         scores = all_scores[q_idx]
         indices = all_indices[q_idx]
-        doc_max_scores = defaultdict(lambda: float('-inf'))
-        for score, idx in zip(scores, indices):
-            if idx < 0:  # FAISS returns -1 for insufficient results
-                continue
-            if idx >= len(p_lookup):  # Boundary check: prevent IndexError
-                logger.warning(f"Index {idx} out of bounds for p_lookup (length {len(p_lookup)}), skipping")
-                continue
+        
+        if aggregation_mode == 'avg':
+            # AvgSim: collect all scores per document, then average
+            doc_scores_list = defaultdict(list)
+            for score, idx in zip(scores, indices):
+                if idx < 0:  # FAISS returns -1 for insufficient results
+                    continue
+                if idx >= len(p_lookup):  # Boundary check: prevent IndexError
+                    logger.warning(f"Index {idx} out of bounds for p_lookup (length {len(p_lookup)}), skipping")
+                    continue
+                
+                try:
+                    doc_id, chunk_idx = p_lookup[idx]
+                except (ValueError, TypeError) as e:
+                    logger.error(f"p_lookup[{idx}] is not a tuple (doc_id, chunk_idx): {p_lookup[idx]}, error: {e}")
+                    continue
+                
+                doc_scores_list[doc_id].append(score)
             
-            try:
-                doc_id, chunk_idx = p_lookup[idx]
-            except (ValueError, TypeError) as e:
-                logger.error(f"p_lookup[{idx}] is not a tuple (doc_id, chunk_idx): {p_lookup[idx]}, error: {e}")
-                continue
+            # Average scores per document
+            doc_avg_scores = {doc_id: sum(scores_list) / len(scores_list) 
+                            for doc_id, scores_list in doc_scores_list.items()}
             
-            # MaxSim: keep the maximum score for each document
-            doc_max_scores[doc_id] = max(doc_max_scores[doc_id], score)
-        # Sort by score and take top-depth
-        sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)[:args.depth]
+            # Sort by score and take top-depth
+            sorted_docs = sorted(doc_avg_scores.items(), key=lambda x: x[1], reverse=True)[:args.depth]
+        else:
+            # MaxSim: keep the maximum score for each document (default)
+            doc_max_scores = defaultdict(lambda: float('-inf'))
+            for score, idx in zip(scores, indices):
+                if idx < 0:  # FAISS returns -1 for insufficient results
+                    continue
+                if idx >= len(p_lookup):  # Boundary check: prevent IndexError
+                    logger.warning(f"Index {idx} out of bounds for p_lookup (length {len(p_lookup)}), skipping")
+                    continue
+                
+                try:
+                    doc_id, chunk_idx = p_lookup[idx]
+                except (ValueError, TypeError) as e:
+                    logger.error(f"p_lookup[{idx}] is not a tuple (doc_id, chunk_idx): {p_lookup[idx]}, error: {e}")
+                    continue
+                
+                # MaxSim: keep the maximum score for each document
+                doc_max_scores[doc_id] = max(doc_max_scores[doc_id], score)
+            
+            # Sort by score and take top-depth
+            sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)[:args.depth]
+        
         aggregated_results.append(sorted_docs)
     return aggregated_results
 
@@ -113,9 +144,11 @@ def main():
     parser.add_argument('--quiet', action='store_true')
     # Chunked search arguments
     parser.add_argument('--chunked', action='store_true',
-                        help='Enable chunked search with document-level MaxSim aggregation')
+                        help='Enable chunked search with document-level aggregation')
     parser.add_argument('--chunk_multiplier', type=int, default=10,
                         help='Multiply search depth by this factor for chunked search to ensure recall')
+    parser.add_argument('--chunk_aggregation_mode', type=str, default='max', choices=['max', 'avg'],
+                        help='Aggregation mode for chunked search: "max" for MaxSim (max score per doc), "avg" for AvgSim (average score per doc)')
 
     args = parser.parse_args()
 
@@ -163,9 +196,10 @@ def main():
     logger.info('Index Search Start')
     
     if is_chunked:
-        # Chunked search with MaxSim aggregation
+        # Chunked search with aggregation (MaxSim or AvgSim)
+        aggregation_mode = getattr(args, 'chunk_aggregation_mode', 'max')
         aggregated_results = search_queries_chunked(retriever, q_reps, look_up, args)
-        logger.info('Index Search Finished (chunked mode with MaxSim aggregation)')
+        logger.info(f'Index Search Finished (chunked mode with {aggregation_mode.upper()}Sim aggregation)')
         
         if args.save_text:
             write_ranking_chunked(aggregated_results, q_lookup, args.save_ranking_to)
