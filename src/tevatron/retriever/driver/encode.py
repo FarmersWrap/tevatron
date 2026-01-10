@@ -130,6 +130,10 @@ def main():
     lookup_indices = []
     model = model.to(training_args.device)
     model.eval()
+    
+    # Track statistics for chunked encoding
+    total_chunks = 0
+    doc_chunk_counts = {}  # doc_id -> number of chunks
 
     for batch in tqdm(encode_loader):
         with torch.amp.autocast('cuda') if training_args.fp16 or training_args.bf16 else nullcontext():
@@ -139,11 +143,19 @@ def main():
                     # batch_inputs: input_ids, attention_mask
                     for k, v in batch_inputs.items():
                         batch_inputs[k] = v.to(training_args.device)
-                    print(f"eos_positions: {eos_positions}")
+                    
                     chunk_embs, chunk_mask = model.encode_passage(batch_inputs, eos_positions)
                     # chunk_embs: [batch_size, max_chunks, hidden_size]
                     # chunk_mask: [batch_size, max_chunks]
                     batch_size, max_chunks, hidden_size = chunk_embs.shape
+                    
+                    # Log EOS count (number of chunks) for each doc in this batch
+                    for i, doc_id in enumerate(doc_ids):
+                        num_chunks = len(eos_positions[i]) if i < len(eos_positions) else 0
+                        doc_chunk_counts[doc_id] = num_chunks
+                        total_chunks += num_chunks
+                        logger.debug(f"Doc {doc_id}: {num_chunks} chunks (EOS positions: {eos_positions[i] if i < len(eos_positions) else []})")
+                    
                     for i, doc_id in enumerate(doc_ids):
                         for chunk_idx in range(max_chunks):
                             if chunk_mask[i, chunk_idx] > 0:  # Valid chunk
@@ -163,17 +175,36 @@ def main():
                         model_output: EncoderOutput = model(passage=batch_inputs)
                         encoded.append(model_output.p_reps.cpu().detach().numpy())
     if use_pre_chunked or use_chunked or use_random_chunking:
-        print("use_chunked: ", use_chunked)
-        print(f"encoded: {encoded}")
-        print(f"lookup_indices: {lookup_indices}")
-        print(f"length of encoded: {len(encoded)}")
-        print(f"length of lookup_indices: {len(lookup_indices)}")
-    # Combine encoded embeddings
+        # Combine encoded embeddings
         encoded = np.stack(encoded)
-        logger.info(f"Encoded {len(set(d for d, c in lookup_indices))} docs into {len(lookup_indices)} chunks")
-        print(f"encoded.shape: {encoded.shape}")
-        print(f"length of encoded: {len(encoded)}")
-        # input("Press Enter to continue...")
+        num_docs = len(set(d for d, c in lookup_indices))
+        num_chunks = len(lookup_indices)
+        
+        # Verify total_chunks matches actual encoded chunks
+        if total_chunks != num_chunks:
+            logger.warning(f"Total chunks count mismatch: counted {total_chunks} EOS tokens but encoded {num_chunks} chunks")
+        
+        # Log summary statistics
+        logger.info(f"Encoded {num_docs} docs into {num_chunks} chunks")
+        logger.info(f"Total chunks in corpus dataset: {num_chunks}")
+        if num_docs > 0:
+            logger.info(f"Average chunks per doc: {num_chunks / num_docs:.2f}")
+        
+        # Log chunk distribution statistics
+        if doc_chunk_counts:
+            chunk_counts_list = list(doc_chunk_counts.values())
+            min_chunks = min(chunk_counts_list)
+            max_chunks = max(chunk_counts_list)
+            mean_chunks = sum(chunk_counts_list) / len(chunk_counts_list)
+            logger.info(f"Chunks per doc statistics - Min: {min_chunks}, Max: {max_chunks}, Mean: {mean_chunks:.2f}")
+        
+        # Log first few docs as examples
+        if doc_chunk_counts:
+            logger.info("Sample doc chunk counts (first 10):")
+            for i, (doc_id, count) in enumerate(list(doc_chunk_counts.items())[:10]):
+                logger.info(f"  Doc {doc_id}: {count} chunks (EOS tokens)")
+        
+        logger.info(f"Encoded embeddings shape: {encoded.shape}")
     else:
         encoded = np.concatenate(encoded)
 
