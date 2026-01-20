@@ -19,11 +19,53 @@ logging.basicConfig(
 )
 
 
+def log_eos_count(p_lookup, is_chunked=False):
+    """Log number of EOS tokens (chunks) per document."""
+    if is_chunked and len(p_lookup) > 0 and isinstance(p_lookup[0], tuple):
+        doc_chunk_counts = defaultdict(int)
+        for doc_id, _ in p_lookup:
+            doc_chunk_counts[doc_id] += 1
+        if doc_chunk_counts:
+            avg_chunks = sum(doc_chunk_counts.values()) / len(doc_chunk_counts)
+            max_chunks = max(doc_chunk_counts.values())
+            logger.info(f"EOS count: avg={avg_chunks:.1f} chunks/doc, max={max_chunks} chunks/doc")
+
+
+def log_passage_eos_details(doc_id, doc_chunks_info):
+    """Log detailed EOS information for a passage: token count, EOS positions, and max EOS."""
+    if not doc_chunks_info:
+        return
+    
+    # doc_chunks_info: list of (chunk_idx, score) tuples
+    eos_positions = sorted([chunk_idx for chunk_idx, _ in doc_chunks_info])
+    scores_by_chunk = {chunk_idx: score for chunk_idx, score in doc_chunks_info}
+    max_score = max(scores_by_chunk.values())
+    max_eos_pos = max(eos_positions, key=lambda pos: scores_by_chunk[pos])
+    
+    num_chunks = len(eos_positions)
+    logger.info(f"Passage {doc_id}: {num_chunks} chunks (EOS positions: {eos_positions}), "
+                f"max similarity at EOS position {max_eos_pos} (score: {max_score:.4f})")
+
+
+def log_max_sim_position(scores, query_idx=None):
+    """Log the position where maximum similarity score occurs."""
+    if len(scores) == 0:
+        return
+    max_score = np.max(scores)
+    max_pos = np.argmax(scores)
+    q_str = f"q{query_idx}: " if query_idx is not None else ""
+    logger.info(f"{q_str}Max similarity position: {max_pos}, score: {max_score:.4f}")
+
+
 def search_queries(retriever, q_reps, p_lookup, args):
     if args.batch_size > 0:
         all_scores, all_indices = retriever.batch_search(q_reps, args.depth, args.batch_size, args.quiet)
     else:
         all_scores, all_indices = retriever.search(q_reps, args.depth)
+
+    # Log max similarity position for first query
+    if len(all_scores) > 0:
+        log_max_sim_position(all_scores[0], query_idx=0)
 
     psg_indices = [[str(p_lookup[x]) for x in q_dd] for q_dd in all_indices]
     psg_indices = np.array(psg_indices)
@@ -34,6 +76,9 @@ def search_queries_chunked(retriever, q_reps, p_lookup, args):
     """
     Search with chunked passages and aggregate by document using MaxSim.
     """
+    # Log EOS count (chunks per document)
+    log_eos_count(p_lookup, is_chunked=True)
+    
     # Search more chunks to ensure good recall after aggregation
     chunk_multiplier = getattr(args, 'chunk_multiplier', 10)
     search_depth = args.depth * chunk_multiplier
@@ -50,6 +95,8 @@ def search_queries_chunked(retriever, q_reps, p_lookup, args):
         scores = all_scores[q_idx]
         indices = all_indices[q_idx]
         doc_max_scores = defaultdict(lambda: float('-inf'))
+        doc_chunks_info = defaultdict(list)  # Track (chunk_idx, score) for each doc
+        
         for score, idx in zip(scores, indices):
             if idx < 0:  # FAISS returns -1 for insufficient results
                 continue
@@ -63,11 +110,26 @@ def search_queries_chunked(retriever, q_reps, p_lookup, args):
                 logger.error(f"p_lookup[{idx}] is not a tuple (doc_id, chunk_idx): {p_lookup[idx]}, error: {e}")
                 continue
             
+            # Track chunk info for logging
+            doc_chunks_info[doc_id].append((chunk_idx, score))
+            
             # MaxSim: keep the maximum score for each document
             doc_max_scores[doc_id] = max(doc_max_scores[doc_id], score)
+        
         # Sort by score and take top-depth
         sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)[:args.depth]
         aggregated_results.append(sorted_docs)
+        
+        # Log detailed EOS info for first query (top 5 passages)
+        if q_idx == 0:
+            if sorted_docs:
+                doc_scores = [s for _, s in sorted_docs]
+                log_max_sim_position(doc_scores, query_idx=0)
+            
+            # Log EOS details for top passages
+            for rank, (doc_id, max_score) in enumerate(sorted_docs[:5]):
+                if doc_id in doc_chunks_info:
+                    log_passage_eos_details(doc_id, doc_chunks_info[doc_id])
     return aggregated_results
 
 
