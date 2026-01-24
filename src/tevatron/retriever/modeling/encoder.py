@@ -77,31 +77,53 @@ class EncoderModel(nn.Module):
 
         # for training
         if self.training:
-            if self.is_ddp:
-                q_reps = self._dist_gather_tensor(q_reps)
-                p_reps = self._dist_gather_tensor(p_reps)
             # print(f"passage_chunk_size: {self.passage_chunk_size}")
             # print(f"chunk_mask: {chunk_mask}")
-            if self.passage_chunk_size > 0 and chunk_mask is not None:
-                # print(f"start compute maxsim similarity==========================")
-                scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
-                # print(f"end compute maxsim similarity==========================")
-            else:
-                # print(f"start compute similarity==========================")
-                scores = self.compute_similarity(q_reps, p_reps)
-            # view the scores as [Q, P] where Q is the number of queries and P is the number of passages
-            scores = scores.view(q_reps.size(0), -1)
+            if self.is_ddp and (self.passage_chunk_size <= 0 or chunk_mask is None):
+                # For non-chunk training, only gather passages and compute loss on local queries.
+                local_q_reps = q_reps
+                local_p_reps = p_reps
+                p_reps = self._dist_gather_tensor(p_reps)
 
-            num_psg_per_query = scores.size(1) // q_reps.size(0)
-            target = torch.arange(q_reps.size(0), device=scores.device, dtype=torch.long)
-            target = target * num_psg_per_query
-            # target contains the indices of the positive passages in this batch target.shape = [Q]
-            # so the target is [0, 4, 8, 12] for batch_size = 2, group_size = 4, chunk_size = 64
-            print(f"target: {target}")
-            print(f"target.shape: {target.shape}")
-            loss = self.compute_loss(scores / self.temperature, target)
-            if self.is_ddp:
-                loss = loss * self.world_size # counter average weight reduction
+                # print(f"start compute similarity==========================")
+                scores = self.compute_similarity(local_q_reps, p_reps)
+                # view the scores as [Q_local, P_global]
+                scores = scores.view(local_q_reps.size(0), -1)
+
+                local_psg_per_query = local_p_reps.size(0) // local_q_reps.size(0)
+                target = torch.arange(local_q_reps.size(0), device=scores.device, dtype=torch.long)
+                target = target * local_psg_per_query + (
+                    self.process_rank * local_q_reps.size(0) * local_psg_per_query
+                )
+                # target contains the indices of the positive passages for local queries
+                # e.g. for rank=1, batch_size=2, group_size=4 -> [8, 12]
+                print(f"target: {target}")
+                print(f"target.shape: {target.shape}")
+                loss = self.compute_loss(scores / self.temperature, target)
+            else:
+                if self.is_ddp:
+                    q_reps = self._dist_gather_tensor(q_reps)
+                    p_reps = self._dist_gather_tensor(p_reps)
+                if self.passage_chunk_size > 0 and chunk_mask is not None:
+                    # print(f"start compute maxsim similarity==========================")
+                    scores = self.compute_maxsim_similarity(q_reps, p_reps, chunk_mask)
+                    # print(f"end compute maxsim similarity==========================")
+                else:
+                    # print(f"start compute similarity==========================")
+                    scores = self.compute_similarity(q_reps, p_reps)
+                # view the scores as [Q, P] where Q is the number of queries and P is the number of passages
+                scores = scores.view(q_reps.size(0), -1)
+
+                num_psg_per_query = scores.size(1) // q_reps.size(0)
+                target = torch.arange(q_reps.size(0), device=scores.device, dtype=torch.long)
+                target = target * num_psg_per_query
+                # target contains the indices of the positive passages in this batch target.shape = [Q]
+                # so the target is [0, 4, 8, 12] for batch_size = 2, group_size = 4, chunk_size = 64
+                print(f"target: {target}")
+                print(f"target.shape: {target.shape}")
+                loss = self.compute_loss(scores / self.temperature, target)
+                if self.is_ddp:
+                    loss = loss * self.world_size # counter average weight reduction
         # for eval
         else:
             if self.passage_chunk_size > 0 and chunk_mask is not None:
