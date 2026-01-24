@@ -1,6 +1,7 @@
 import logging
 import random
 import torch
+import torch.distributed as dist
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from transformers import PreTrainedTokenizer, ProcessorMixin
@@ -195,6 +196,17 @@ class TrainCollator:
         :param features: list of (query, passages) tuples
         :return: tokenized query_ids, passage_ids, [eos_positions if chunked]
         """
+        if not getattr(self, "_logged_batch_comp", False):
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            group_size_actual = len(features[0][1]) if features else 0
+            logger.info(
+                "[collator batch] rank=%s batch=%s group_size_arg=%s group_size_actual=%s",
+                rank,
+                len(features),
+                self.data_args.train_group_size,
+                group_size_actual,
+            )
+            self._logged_batch_comp = True
         all_queries = [f[0] for f in features]
         all_passages = []
         for f in features:
