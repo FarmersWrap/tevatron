@@ -1,0 +1,31 @@
+rm -rf /root/autodl-tmp/tevatron/retriever-two-gpu-no-chunk-mldr
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node 2 --master_port 60001 \
+  -m tevatron.retriever.driver.train \
+  --output_dir /root/autodl-tmp/tevatron/retriever-two-gpu-no-chunk-mldr \
+  --model_name_or_path Qwen/Qwen3-Embedding-0.6B \
+  --do_train \
+  --lora \
+  --untie_encoder \
+  --lora_target_modules q_proj,k_proj,v_proj,o_proj,down_proj,up_proj,gate_proj \
+  --save_steps 5000 \
+  --dataset_name Shitao/MLDR \
+  --dataset_config en \
+  --dataset_split train \
+  --query_prefix "Instruct: Given a question, retrieve documents that answer the question.\nQuery:" \
+  --passage_prefix "" \
+  --bf16 \
+  --pooling last \
+  --padding_side right \
+  --normalize \
+  --temperature 0.03 \
+  --per_device_train_batch_size 8 \
+  --train_group_size 4 \
+  --learning_rate 1e-4 \
+  --query_max_len 32 \
+  --passage_max_len 4096 \
+  --num_train_epochs 1 \
+  --logging_steps 10 \
+  --overwrite_output_dir \
+  --gradient_checkpointing \
+  --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
+  --gradient_accumulation_steps 1

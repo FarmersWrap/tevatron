@@ -17,7 +17,7 @@ class DenseModel(EncoderModel):
         self.eos_positions = None
 
     def encode_query(self, qry):
-        query_hidden_states = self.encoder(**qry, return_dict=True)
+        query_hidden_states = self.query_encoder(**qry, return_dict=True)
         query_hidden_states = query_hidden_states.last_hidden_state
         return self._pooling(query_hidden_states, qry['attention_mask'])
     

@@ -1,6 +1,6 @@
 rm -rf retriever-one-gpu-no-chunk-mldr
 CUDA_VISIBLE_DEVICES=0 python -m tevatron.retriever.driver.train \
-  --output_dir retriever-one-gpu-no-chunk-mldr \
+  --output_dir retriever-one-gpu-no-chunk \
   --model_name_or_path Qwen/Qwen3-Embedding-0.6B \
   --do_train \
   --lora \
@@ -15,20 +15,17 @@ CUDA_VISIBLE_DEVICES=0 python -m tevatron.retriever.driver.train \
   --pooling last \
   --padding_side right \
   --normalize \
-  --temperature 0.01 \
-  --per_device_train_batch_size 8 \
+  --temperature 0.03 \
+  --per_device_train_batch_size 2 \
   --gradient_checkpointing \
-  --train_group_size 16 \
+  --train_group_size 2 \
   --learning_rate 1e-4 \
   --query_max_len 32 \
-  --passage_max_len 512 \
+  --passage_max_len 4096 \
   --num_train_epochs 1 \
-  --logging_steps 20 \
+  --logging_steps 10 \
   --overwrite_output_dir \
-  --gradient_accumulation_steps 1 \
-  --dataloader_drop_last true \
-  --seed 42 \
-  --attn_implementation sdpa
+  --gradient_accumulation_steps 1 
 
 
 # output_dir=/root/autodl-tmp/tevatron/retriever-one-gpu-no-chunk-mldr

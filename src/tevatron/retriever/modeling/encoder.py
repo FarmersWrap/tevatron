@@ -36,6 +36,8 @@ class EncoderModel(nn.Module):
         super().__init__()
         self.config = encoder.config
         self.encoder = encoder
+        # Default to a tied encoder; can be overridden to untie in build().
+        self.query_encoder = encoder
         self.pooling = pooling
         self.normalize = normalize
         self.temperature = temperature
@@ -237,33 +239,42 @@ class EncoderModel(nn.Module):
             train_args: TrainingArguments,
             **hf_kwargs,
     ):  
-        base_model = cls.TRANSFORMER_CLS.from_pretrained(model_args.model_name_or_path, **hf_kwargs)
-        if base_model.config.pad_token_id is None:
-            base_model.config.pad_token_id = 0
-        if model_args.lora or model_args.lora_name_or_path:
-            if train_args.gradient_checkpointing:
-                base_model.enable_input_require_grads()
-            if model_args.lora_name_or_path:
-                lora_config = LoraConfig.from_pretrained(model_args.lora_name_or_path, **hf_kwargs)
-                lora_model = PeftModel.from_pretrained(base_model, model_args.lora_name_or_path, is_trainable=True)
-            else:
-                lora_config = LoraConfig(
-                    base_model_name_or_path=model_args.model_name_or_path,
-                    task_type=TaskType.FEATURE_EXTRACTION,
-                    r=model_args.lora_r,
-                    lora_alpha=model_args.lora_alpha,
-                    lora_dropout=model_args.lora_dropout,
-                    target_modules=model_args.lora_target_modules.split(','),
-                    inference_mode=False
-                )
-                lora_model = get_peft_model(base_model, lora_config)
+        def build_encoder():
+            base_model = cls.TRANSFORMER_CLS.from_pretrained(model_args.model_name_or_path, **hf_kwargs)
+            if base_model.config.pad_token_id is None:
+                base_model.config.pad_token_id = 0
+            if model_args.lora or model_args.lora_name_or_path:
+                if train_args.gradient_checkpointing:
+                    base_model.enable_input_require_grads()
+                if model_args.lora_name_or_path:
+                    lora_config = LoraConfig.from_pretrained(model_args.lora_name_or_path, **hf_kwargs)
+                    lora_model = PeftModel.from_pretrained(base_model, model_args.lora_name_or_path, is_trainable=True)
+                else:
+                    lora_config = LoraConfig(
+                        base_model_name_or_path=model_args.model_name_or_path,
+                        task_type=TaskType.FEATURE_EXTRACTION,
+                        r=model_args.lora_r,
+                        lora_alpha=model_args.lora_alpha,
+                        lora_dropout=model_args.lora_dropout,
+                        target_modules=model_args.lora_target_modules.split(','),
+                        inference_mode=False
+                    )
+                    lora_model = get_peft_model(base_model, lora_config)
+                return lora_model
+            return base_model
+
+        if model_args.untie_encoder:
+            query_encoder = build_encoder()
+            passage_encoder = build_encoder()
             model = cls(
-                encoder=lora_model,
+                encoder=passage_encoder,
                 pooling=model_args.pooling,
                 normalize=model_args.normalize,
                 temperature=model_args.temperature
             )
+            model.query_encoder = query_encoder
         else:
+            base_model = build_encoder()
             model = cls(
                 encoder=base_model,
                 pooling=model_args.pooling,

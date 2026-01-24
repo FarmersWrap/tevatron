@@ -24,4 +24,5 @@ CUDA_VISIBLE_DEVICES=0 python -m tevatron.retriever.driver.train \
   --logging_steps 10 \
   --overwrite_output_dir \
   --gradient_accumulation_steps 1 \
-  --passage_chunk_size 256
+  --passage_chunk_size 256 \
+  --attn_implementation sdpa

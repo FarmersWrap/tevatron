@@ -62,6 +62,11 @@ class ModelArguments:
         metadata={"help": "lora target modules"}
     )
 
+    untie_encoder: bool = field(
+        default=False,
+        metadata={"help": "use separate query and passage encoders (avoids DDP+checkpointing conflicts)"}
+    )
+
     # for Jax training
     dtype: Optional[str] = field(
         default="float32",
