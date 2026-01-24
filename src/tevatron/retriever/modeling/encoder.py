@@ -4,6 +4,7 @@ from typing import Dict, Optional
 import os
 import torch
 import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 from torch import nn, Tensor
 
 from transformers import PreTrainedModel, AutoModel
@@ -91,6 +92,19 @@ class EncoderModel(nn.Module):
                 scores = scores.view(local_q_reps.size(0), -1)
 
                 local_psg_per_query = local_p_reps.size(0) // local_q_reps.size(0)
+                if not getattr(self, "_logged_batch_comp", False):
+                    logger.info(
+                        "[ddp batch] rank=%s world=%s local_q=%s local_p=%s "
+                        "group_size=%s global_p=%s chunked=%s",
+                        self.process_rank,
+                        self.world_size,
+                        local_q_reps.size(0),
+                        local_p_reps.size(0),
+                        local_psg_per_query,
+                        p_reps.size(0),
+                        False,
+                    )
+                    self._logged_batch_comp = True
                 target = torch.arange(local_q_reps.size(0), device=scores.device, dtype=torch.long)
                 target = target * local_psg_per_query + (
                     self.process_rank * local_q_reps.size(0) * local_psg_per_query
@@ -115,6 +129,19 @@ class EncoderModel(nn.Module):
                 scores = scores.view(q_reps.size(0), -1)
 
                 num_psg_per_query = scores.size(1) // q_reps.size(0)
+                if self.is_ddp and not getattr(self, "_logged_batch_comp", False):
+                    logger.info(
+                        "[ddp batch] rank=%s world=%s local_q=%s local_p=%s "
+                        "group_size=%s global_p=%s chunked=%s",
+                        self.process_rank,
+                        self.world_size,
+                        q_reps.size(0),
+                        p_reps.size(0),
+                        num_psg_per_query,
+                        p_reps.size(0),
+                        self.passage_chunk_size > 0 and chunk_mask is not None,
+                    )
+                    self._logged_batch_comp = True
                 target = torch.arange(q_reps.size(0), device=scores.device, dtype=torch.long)
                 target = target * num_psg_per_query
                 # target contains the indices of the positive passages in this batch target.shape = [Q]
@@ -212,13 +239,15 @@ class EncoderModel(nn.Module):
             return None
         t = t.contiguous()
 
+        if self.training and t.requires_grad:
+            # Autograd-friendly gather so cross-rank negatives receive gradients.
+            gathered = dist_nn.all_gather(t)
+            return torch.cat(gathered, dim=0)
+
         all_tensors = [torch.empty_like(t) for _ in range(self.world_size)]
         dist.all_gather(all_tensors, t)
-
         all_tensors[self.process_rank] = t
-        all_tensors = torch.cat(all_tensors, dim=0)
-
-        return all_tensors
+        return torch.cat(all_tensors, dim=0)
 
     @classmethod
     def build(
