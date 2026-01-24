@@ -37,7 +37,7 @@ cycler==0.12.1
 cyclopts==3.24.0
 cymem==2.0.11
 Cython==3.1.4
-datasets==2.19.0
+datasets==2.18.0
 decorator==5.2.1
 decord==0.6.0
 deepspeed==0.18.0
@@ -66,7 +66,7 @@ flatbuffers==25.9.23
 fonttools==4.60.1
 frozendict==2.4.6
 frozenlist==1.8.0
-fsspec==2024.3.1
+fsspec>=2023.1.0,<=2024.2.0
 ftfy==6.3.1
 gguf==0.17.1
 h11==0.16.0
@@ -76,7 +76,7 @@ httpcore==1.0.9
 httptools==0.7.1
 httpx==0.28.1
 httpx-sse==0.4.3
-huggingface-hub==0.35.3
+huggingface-hub>=0.34.0,<1.0
 humanfriendly==10.0
 idna==3.10
 ijson==3.4.0.post0
