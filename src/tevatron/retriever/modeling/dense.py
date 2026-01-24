@@ -1,4 +1,6 @@
+import os
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import logging
 from transformers import Qwen2_5OmniThinkerForConditionalGeneration
@@ -20,7 +22,8 @@ class DenseModel(EncoderModel):
         return self._pooling(query_hidden_states, qry['attention_mask'])
     
     def encode_passage(self, psg, eos_positions=None):
-        print(f"eos_positions: {eos_positions}")
+        if os.getenv("TEVATRON_DEBUG_MAXSIM") == "1":
+            logger.info("debug_maxsim: eos_positions=%s", eos_positions)
         hidden_states = self.encoder(**psg, return_dict=True).last_hidden_state
         if self.passage_chunk_size > 0 and eos_positions:
             for i, ep in enumerate(eos_positions):
@@ -33,19 +36,31 @@ class DenseModel(EncoderModel):
 
     def _pooling_chunked(self, last_hidden_state, eos_positions):
         batch_size, seq_len, hidden_size = last_hidden_state.shape
-        print(f"last_hidden_state.shape: {last_hidden_state.shape}")
-        print(f"eos_positions: {eos_positions}")
+        logger.info("debug_maxsim: last_hidden_state.shape=%s", last_hidden_state.shape)
+        logger.info("debug_maxsim: eos_positions=%s", eos_positions)
         
         if not eos_positions:
             # No chunks, return empty
             return torch.zeros(batch_size, 0, hidden_size, device=last_hidden_state.device, dtype=last_hidden_state.dtype), \
                    torch.zeros(batch_size, 0, device=last_hidden_state.device)
         
-        # Find max number of chunks across all passages
+        # Find max number of chunks across all passages in this rank
         for eos_pos in eos_positions:
-            print(f"eos_pos: {eos_pos}")
-            print(f"type(eos_pos): {type(eos_pos)}")
+            logger.info("debug_maxsim: eos_pos=%s type=%s", eos_pos, type(eos_pos))
         max_chunks = max(len(pos_list) for pos_list in eos_positions)
+        # Ensure max_chunks is consistent across ranks to avoid all_gather shape mismatches.
+        if dist.is_available() and dist.is_initialized():
+            max_chunks_tensor = torch.tensor([max_chunks], device=last_hidden_state.device)
+            dist.all_reduce(max_chunks_tensor, op=dist.ReduceOp.MAX)
+            global_max_chunks = int(max_chunks_tensor.item())
+            if global_max_chunks != max_chunks:
+                logger.warning(
+                    "debug_maxsim: rank=%s local_max_chunks=%s global_max_chunks=%s",
+                    dist.get_rank(),
+                    max_chunks,
+                    global_max_chunks,
+                )
+            max_chunks = global_max_chunks
         
         chunk_reps = torch.zeros(batch_size, max_chunks, hidden_size, device=last_hidden_state.device, dtype=last_hidden_state.dtype)
         chunk_mask = torch.zeros(batch_size, max_chunks, device=last_hidden_state.device, dtype=torch.float)
