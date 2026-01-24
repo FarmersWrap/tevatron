@@ -32,27 +32,78 @@ class TrainDataset(Dataset):
         self.trainer = trainer
 
         # Load training data
-        self.train_data = load_dataset(
-            self.data_args.dataset_name if dataset_name is None else dataset_name,
-            self.data_args.dataset_config,
-            data_files=self.data_args.dataset_path if dataset_path is None else dataset_path,
-            split=self.data_args.dataset_split,
-            cache_dir=self.data_args.dataset_cache_dir,
-            num_proc=self.data_args.num_proc,
-        )
+        dataset_name_to_load = self.data_args.dataset_name if dataset_name is None else dataset_name
+        try:
+            self.train_data = load_dataset(
+                dataset_name_to_load,
+                self.data_args.dataset_config,
+                data_files=self.data_args.dataset_path if dataset_path is None else dataset_path,
+                split=self.data_args.dataset_split,
+                cache_dir=self.data_args.dataset_cache_dir,
+                num_proc=self.data_args.num_proc,
+                download_mode="use_cache" if self.data_args.dataset_cache_dir else None,
+            )
+        except RuntimeError as e:
+            if "Dataset scripts are no longer supported" in str(e) or "scifact.py" in str(e):
+                # Try to load from cache if available
+                logger.warning(f"Script-based dataset loading failed for {dataset_name_to_load}. Attempting to load from cache...")
+                try:
+                    self.train_data = load_dataset(
+                        dataset_name_to_load,
+                        self.data_args.dataset_config,
+                        data_files=self.data_args.dataset_path if dataset_path is None else dataset_path,
+                        split=self.data_args.dataset_split,
+                        cache_dir=self.data_args.dataset_cache_dir,
+                        num_proc=self.data_args.num_proc,
+                        download_mode="use_cache",
+                    )
+                except Exception as e2:
+                    raise RuntimeError(
+                        f"Failed to load dataset {dataset_name_to_load}. "
+                        f"The dataset uses a Python script which is no longer supported by the datasets library. "
+                        f"Please either: (1) downgrade datasets library to <2.20.0, "
+                        f"(2) use a pre-cached version of the dataset, or "
+                        f"(3) contact the dataset maintainer to convert it to Parquet format."
+                    ) from e2
+            else:
+                raise
 
         # Load corpus if provided
         if self.data_args.corpus_name is None and corpus_name is None:
             self.corpus = None
         else:
-            self.corpus = load_dataset(
-                self.data_args.corpus_name if corpus_name is None else corpus_name,
-                self.data_args.corpus_config,
-                data_files=self.data_args.corpus_path if corpus_path is None else corpus_path,
-                split=self.data_args.corpus_split,
-                cache_dir=self.data_args.dataset_cache_dir,
-                num_proc=self.data_args.num_proc,
-            )
+            corpus_name_to_load = self.data_args.corpus_name if corpus_name is None else corpus_name
+            try:
+                self.corpus = load_dataset(
+                    corpus_name_to_load,
+                    self.data_args.corpus_config,
+                    data_files=self.data_args.corpus_path if corpus_path is None else corpus_path,
+                    split=self.data_args.corpus_split,
+                    cache_dir=self.data_args.dataset_cache_dir,
+                    num_proc=self.data_args.num_proc,
+                    download_mode="use_cache" if self.data_args.dataset_cache_dir else None,
+                )
+            except RuntimeError as e:
+                if "Dataset scripts are no longer supported" in str(e):
+                    logger.warning(f"Script-based dataset loading failed for {corpus_name_to_load}. Attempting to load from cache...")
+                    try:
+                        self.corpus = load_dataset(
+                            corpus_name_to_load,
+                            self.data_args.corpus_config,
+                            data_files=self.data_args.corpus_path if corpus_path is None else corpus_path,
+                            split=self.data_args.corpus_split,
+                            cache_dir=self.data_args.dataset_cache_dir,
+                            num_proc=self.data_args.num_proc,
+                            download_mode="use_cache",
+                        )
+                    except Exception as e2:
+                        raise RuntimeError(
+                            f"Failed to load corpus {corpus_name_to_load}. "
+                            f"The dataset uses a Python script which is no longer supported. "
+                            f"Please either downgrade datasets library to <2.20.0 or use a pre-cached version."
+                        ) from e2
+                else:
+                    raise
         
         # for video we use assets_path to load the video
         self.corpus_assets_path = corpus_assets_path if corpus_assets_path is not None else self.data_args.assets_path
@@ -303,14 +354,37 @@ class EncodeDataset(Dataset):
 
     def __init__(self, data_args: DataArguments):
         self.data_args = data_args
-        self.encode_data = load_dataset(
-            self.data_args.dataset_name,
-            self.data_args.dataset_config,
-            data_files=self.data_args.dataset_path,
-            split=self.data_args.dataset_split,
-            cache_dir=self.data_args.dataset_cache_dir,
-            num_proc=self.data_args.num_proc,
-        )
+        try:
+            self.encode_data = load_dataset(
+                self.data_args.dataset_name,
+                self.data_args.dataset_config,
+                data_files=self.data_args.dataset_path,
+                split=self.data_args.dataset_split,
+                cache_dir=self.data_args.dataset_cache_dir,
+                num_proc=self.data_args.num_proc,
+                download_mode="use_cache" if self.data_args.dataset_cache_dir else None,
+            )
+        except RuntimeError as e:
+            if "Dataset scripts are no longer supported" in str(e):
+                logger.warning(f"Script-based dataset loading failed for {self.data_args.dataset_name}. Attempting to load from cache...")
+                try:
+                    self.encode_data = load_dataset(
+                        self.data_args.dataset_name,
+                        self.data_args.dataset_config,
+                        data_files=self.data_args.dataset_path,
+                        split=self.data_args.dataset_split,
+                        cache_dir=self.data_args.dataset_cache_dir,
+                        num_proc=self.data_args.num_proc,
+                        download_mode="use_cache",
+                    )
+                except Exception as e2:
+                    raise RuntimeError(
+                        f"Failed to load dataset {self.data_args.dataset_name}. "
+                        f"The dataset uses a Python script which is no longer supported. "
+                        f"Please either downgrade datasets library to <2.20.0 or use a pre-cached version."
+                    ) from e2
+            else:
+                raise
         if self.data_args.dataset_number_of_shards > 1:
             self.encode_data = self.encode_data.shard(
                 num_shards=self.data_args.dataset_number_of_shards,

@@ -77,9 +77,18 @@ class EncoderModel(nn.Module):
 
         # for training
         if self.training:
+            local_q_reps = q_reps
             if self.is_ddp:
-                q_reps = self._dist_gather_tensor(q_reps)
-                p_reps = self._dist_gather_tensor(p_reps)
+                # By default we gather passages across ranks for global negatives.
+                # Set TEVATRON_DDP_GATHER_NEGATIVES=0 to match single-GPU behavior.
+                gather_negatives = os.getenv("TEVATRON_DDP_GATHER_NEGATIVES", "1") == "1"
+                if gather_negatives:
+                    # Gather passages across ranks, keep queries local to avoid
+                    # applying loss to non-local queries without gradients.
+                    p_reps = self._dist_gather_tensor(p_reps)
+                    if chunk_mask is not None:
+                        # Keep chunk_mask aligned with gathered passages for MaxSim.
+                        chunk_mask = self._dist_gather_tensor(chunk_mask)
             # print(f"passage_chunk_size: {self.passage_chunk_size}")
             # print(f"chunk_mask: {chunk_mask}")
             if self.passage_chunk_size > 0 and chunk_mask is not None:
@@ -89,12 +98,38 @@ class EncoderModel(nn.Module):
             else:
                 # print(f"start compute similarity==========================")
                 scores = self.compute_similarity(q_reps, p_reps)
-            # view the scores as [Q, P] where Q is the number of queries and P is the number of passages
-            scores = scores.view(q_reps.size(0), -1)
+            # view the scores as [Q, P] where Q is the number of local queries and P is global passages
+            scores = scores.view(local_q_reps.size(0), -1)
 
-            num_psg_per_query = scores.size(1) // q_reps.size(0)
-            target = torch.arange(q_reps.size(0), device=scores.device, dtype=torch.long)
-            target = target * num_psg_per_query
+            if self.is_ddp:
+                gather_negatives = os.getenv("TEVATRON_DDP_GATHER_NEGATIVES", "1") == "1"
+                if gather_negatives:
+                    denom = local_q_reps.size(0) * self.world_size
+                    base = self.process_rank * local_q_reps.size(0)
+                else:
+                    denom = local_q_reps.size(0)
+                    base = 0
+                num_psg_per_query = scores.size(1) // denom
+                base = base * num_psg_per_query
+            else:
+                num_psg_per_query = scores.size(1) // local_q_reps.size(0)
+                base = 0
+            target = torch.arange(local_q_reps.size(0), device=scores.device, dtype=torch.long)
+            target = target * num_psg_per_query + base
+            if self.is_ddp and scores.size(1) % (local_q_reps.size(0) * self.world_size) != 0:
+                logger.warning(
+                    "Uneven DDP batch detected: scores.size(1)=%s local_q=%s world_size=%s. "
+                    "Targets may be misaligned; consider setting --dataloader_drop_last true.",
+                    scores.size(1),
+                    local_q_reps.size(0),
+                    self.world_size,
+                )
+            if os.getenv("TEVATRON_DEBUG_TARGETS") == "1":
+                with torch.no_grad():
+                    top1 = scores.argmax(dim=1)
+                    acc = (top1 == target).float().mean().item()
+                if (not self.is_ddp) or self.process_rank == 0:
+                    logger.info("debug_targets: rank=%s top1_acc=%.4f", self.process_rank if self.is_ddp else 0, acc)
             # target contains the indices of the positive passages in this batch target.shape = [Q]
             # so the target is [0, 4, 8, 12] for batch_size = 2, group_size = 4, chunk_size = 64
             print(f"target: {target}")

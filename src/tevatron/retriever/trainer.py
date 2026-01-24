@@ -48,8 +48,15 @@ class TevatronTrainer(Trainer):
         query, passage, *rest = inputs
         eos_positions = rest[0] if rest else None
         # input(f"trainer.compute_loss: eos_positions: {eos_positions}")
-        if hasattr(model, 'eos_positions'):
-            model.eos_positions = eos_positions
+        model_for_attrs = model.module if hasattr(model, "module") else model
+        if hasattr(model_for_attrs, "eos_positions"):
+            model_for_attrs.eos_positions = eos_positions
+        if getattr(model_for_attrs, "passage_chunk_size", 0) > 0 and eos_positions is None:
+            logger.warning(
+                "Chunked training enabled (passage_chunk_size=%s) but eos_positions is None. "
+                "MaxSim will be disabled for this batch.",
+                getattr(model_for_attrs, "passage_chunk_size", 0),
+            )
         return model(query=query, passage=passage).loss
 
     def training_step(self, *args):
