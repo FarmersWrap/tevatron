@@ -188,7 +188,14 @@ class EncoderModel(nn.Module):
         return self.cross_entropy(scores, target)
     
     def gradient_checkpointing_enable(self, **kwargs):
-        self.encoder.gradient_checkpointing_enable()
+        # Force use_reentrant=False: the encoder is shared for both query and
+        # passage, so reentrant checkpointing causes "parameter marked as ready
+        # twice" errors in DDP.  Non-reentrant checkpointing handles this
+        # correctly without needing _set_static_graph().
+        gc_kwargs = kwargs.get('gradient_checkpointing_kwargs', None) or {}
+        gc_kwargs.setdefault('use_reentrant', False)
+        kwargs['gradient_checkpointing_kwargs'] = gc_kwargs
+        self.encoder.gradient_checkpointing_enable(**kwargs)
 
     def _dist_gather_tensor(self, t: Optional[torch.Tensor]):
         if t is None:

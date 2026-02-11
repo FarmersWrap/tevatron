@@ -17,15 +17,6 @@ class TevatronTrainer(Trainer):
         self.is_ddp = dist.is_initialized()
         self._dist_loss_scale_factor = dist.get_world_size() if self.is_ddp else 1
 
-    def _wrap_model(self, model, training=True, dataloader=None):
-        """Override to enable static_graph for DDP with gradient checkpointing."""
-        wrapped = super()._wrap_model(model, training, dataloader)
-        # Enable static graph to handle gradient checkpointing
-        if self.is_ddp and self.args.gradient_checkpointing and hasattr(wrapped, '_set_static_graph'):
-            wrapped._set_static_graph()
-            logger.info("Enabled DDP static graph mode")
-        return wrapped
-
     def _dist_gather_tensor(self, t: Optional[torch.Tensor], name: str = "tensor") -> Optional[torch.Tensor]:
         """Gather tensor from all ranks, concatenating along dim 0 (batch dimension).
 
@@ -162,10 +153,9 @@ class TevatronTrainer(Trainer):
                     f"chunk_counts={chunk_counts}, max_local_chunks={max_local_chunks}"
                 )
 
-        # Note: static_graph is already set in _wrap_model(). Do NOT call
-        # _set_static_graph() again here — a second call can corrupt DDP's
-        # internal graph recording state and cause NCCL deadlocks on step 2,
-        # especially with the independent-chunk path where total_chunks varies.
+        # Note: _set_static_graph() is NOT used. The "parameter marked as ready
+        # twice" DDP error (encoder shared for query+passage) is solved by
+        # use_reentrant=False in gradient_checkpointing_enable() instead.
 
         # Get embeddings from model (forward() will read eos_positions from unwrapped_model)
         output = model(query=query, passage=passage)

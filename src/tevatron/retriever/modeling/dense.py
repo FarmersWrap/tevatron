@@ -186,7 +186,10 @@ class MultiModalDenseModel(DenseModel):
         self.config.hidden_size = 3584
 
     def gradient_checkpointing_enable(self, **kwargs):
-        self.encoder.model.gradient_checkpointing_enable()
+        gc_kwargs = kwargs.get('gradient_checkpointing_kwargs', None) or {}
+        gc_kwargs.setdefault('use_reentrant', False)
+        kwargs['gradient_checkpointing_kwargs'] = gc_kwargs
+        self.encoder.model.gradient_checkpointing_enable(**kwargs)
 
     def encode_query(self, qry):
         cache_position = torch.arange(0, qry['input_ids'].shape[1], device=qry['input_ids'].device)
