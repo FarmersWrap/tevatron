@@ -162,12 +162,10 @@ class TevatronTrainer(Trainer):
                     f"chunk_counts={chunk_counts}, max_local_chunks={max_local_chunks}"
                 )
 
-        # Set static graph on first call if needed (for gradient_checkpointing + DDP)
-        if self.is_ddp and self.args.gradient_checkpointing and not hasattr(self, '_static_graph_set'):
-            if hasattr(model, '_set_static_graph'):
-                model._set_static_graph()
-                logger.info("Enabled DDP static graph mode in compute_loss")
-            self._static_graph_set = True
+        # Note: static_graph is already set in _wrap_model(). Do NOT call
+        # _set_static_graph() again here — a second call can corrupt DDP's
+        # internal graph recording state and cause NCCL deadlocks on step 2,
+        # especially with the independent-chunk path where total_chunks varies.
 
         # Get embeddings from model (forward() will read eos_positions from unwrapped_model)
         output = model(query=query, passage=passage)
